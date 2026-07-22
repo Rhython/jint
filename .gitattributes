@@ -19,3 +19,12 @@ Jint.Tests.Test262/** linguist-vendored
 # would change the cache key (hashFiles) and the MSBuild regeneration gate, turning every
 # cross-OS cache restore into a full regeneration.
 Jint.Tests.Test262/Test262Harness.settings.json text eol=lf
+
+# These five files are CRLF in the uploaded upstream snapshot. Keep their bytes unchanged so
+# the audit patch applies to the exact input archive and the source archive remains byte-identical
+# to the tested working tree instead of introducing unrelated line-ending normalization.
+Jint.Tests/Runtime/Domain/ClassWithStaticFields.cs -text
+Jint.Tests/Runtime/EngineTests.cs -text
+Jint.Tests/Runtime/InteropTests.cs -text
+Jint/Runtime/Interop/NamespaceReference.cs -text
+Jint/Runtime/Interop/TypeReference.cs -text

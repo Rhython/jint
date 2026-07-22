@@ -1,7 +1,9 @@
+using System.Threading;
 using Jint.Native;
 using Jint.Native.Object;
 using Jint.Native.Promise;
 using Jint.Runtime;
+using Jint.Runtime.Continuations;
 using Jint.Runtime.Interop;
 
 namespace Jint;
@@ -26,6 +28,7 @@ public partial class Engine
         {
             get
             {
+                _engine.VerifyHostContinuationThreadAccess();
                 var lastSyntaxElement = _engine._lastSyntaxElement;
                 if (lastSyntaxElement is null)
                 {
@@ -41,6 +44,7 @@ public partial class Engine
         /// </summary>
         public void ResetCallStack()
         {
+            _engine.VerifyHostContinuationThreadAccess();
             _engine.ResetCallStack();
         }
 
@@ -49,6 +53,7 @@ public partial class Engine
         /// </summary>
         public void ProcessTasks()
         {
+            _engine.VerifyHostContinuationThreadAccess();
             _engine.RunAvailableContinuations();
         }
 
@@ -64,6 +69,7 @@ public partial class Engine
         /// <returns>a Promise instance and functions to either resolve or reject it</returns>
         public ManualPromise RegisterPromise()
         {
+            _engine.VerifyHostContinuationThreadAccess();
             return _engine.RegisterPromise();
         }
 
@@ -86,6 +92,7 @@ public partial class Engine
         /// <returns>The proxy object, ready to be passed into script.</returns>
         public ObjectInstance CreateProxy(ObjectInstance target, ProxyHandler handler)
         {
+            _engine.VerifyHostContinuationThreadAccess();
             if (target is null)
             {
                 Throw.ArgumentNullException(nameof(target));
@@ -109,6 +116,7 @@ public partial class Engine
         /// <returns>The proxy paired with its revoke operation.</returns>
         public RevocableProxy CreateRevocableProxy(ObjectInstance target, ProxyHandler handler)
         {
+            _engine.VerifyHostContinuationThreadAccess();
             if (target is null)
             {
                 Throw.ArgumentNullException(nameof(target));
@@ -120,6 +128,59 @@ public partial class Engine
             }
 
             return new RevocableProxy(new JsProxy(_engine, target, handler));
+        }
+
+        /// <summary>
+        /// Creates a host function that may suspend an unchanged, synchronous-looking script while
+        /// a CLR operation completes without blocking a thread.
+        /// </summary>
+        public HostContinuationFunction CreateHostContinuationFunction(
+            string name,
+            HostContinuationHandler handler,
+            int length = 0,
+            HostContinuationResultConverter? resultConverter = null)
+        {
+            _engine.VerifyHostContinuationThreadAccess();
+            return new HostContinuationFunction(_engine, name, handler, length, resultConverter);
+        }
+
+        /// <summary>
+        /// Creates a strongly typed, NativeAOT-friendly host-continuation function. The request
+        /// snapshot is produced on the owner thread; only the CLR request/result cross the async
+        /// boundary, and the JavaScript result is reconstructed on the owner thread.
+        /// </summary>
+        public HostContinuationFunction CreateHostContinuationFunction<TRequest, TResult>(
+            string name,
+            Func<JsValue, JsValue[], TRequest> requestSnapshot,
+            Func<TRequest, CancellationToken, ValueTask<TResult>> operation,
+            Func<Engine, TResult, JsValue> resultConverter,
+            int length = 0)
+        {
+            if (requestSnapshot is null)
+            {
+                Throw.ArgumentNullException(nameof(requestSnapshot));
+            }
+            if (operation is null)
+            {
+                Throw.ArgumentNullException(nameof(operation));
+            }
+            if (resultConverter is null)
+            {
+                Throw.ArgumentNullException(nameof(resultConverter));
+            }
+
+            return CreateHostContinuationFunction(
+                name,
+                (thisObject, arguments, cancellationToken) =>
+                {
+                    var request = requestSnapshot(thisObject, arguments);
+                    return BoxResultAsync(operation(request, cancellationToken));
+                },
+                length,
+                (engine, result) => resultConverter(engine, (TResult) result!));
+
+            static async ValueTask<object?> BoxResultAsync(ValueTask<TResult> pending)
+                => await pending.ConfigureAwait(false);
         }
 
         /// <summary>

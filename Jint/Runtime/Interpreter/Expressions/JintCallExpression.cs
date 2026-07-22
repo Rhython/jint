@@ -4,6 +4,7 @@ using Jint.Native;
 using Jint.Native.Function;
 using Jint.Native.Object;
 using Jint.Runtime.CallStack;
+using Jint.Runtime.Continuations;
 using Jint.Runtime.Environments;
 using Environment = Jint.Runtime.Environments.Environment;
 
@@ -13,6 +14,7 @@ internal sealed class JintCallExpression : JintExpression
 {
     private readonly ExpressionCache _arguments = new();
     private readonly JintExpression _calleeExpression;
+    private readonly object _hostCallStateKey = new();
 
     public JintCallExpression(CallExpression expression) : base(expression)
     {
@@ -22,9 +24,17 @@ internal sealed class JintCallExpression : JintExpression
 
     protected override object EvaluateInternal(EvaluationContext context)
     {
-
-        if (!context.Engine._stackGuard.TryEnterOnCurrentStack())
+        var engine = context.Engine;
+        if (!engine._stackGuard.TryEnterOnCurrentStack())
         {
+            // StackGuard.RunOnEmptyStack executes on TaskScheduler.Default and synchronously waits.
+            // Both behaviors violate the owner-thread and non-blocking invariants of this mode.
+            if (engine.ActiveHostContinuationRun is not null)
+            {
+                Throw.RangeError(
+                    engine.Realm,
+                    "The implicit host-continuation runtime cannot migrate JavaScript execution to another CLR thread when the native stack is exhausted.");
+            }
             return StackGuard.RunOnEmptyStack(EvaluateInternal, context);
         }
 
@@ -33,186 +43,353 @@ internal sealed class JintCallExpression : JintExpression
             return SuperCall(context);
         }
 
-        // https://tc39.es/ecma262/#sec-function-calls
-
-        var engine = context.Engine;
-
-        // The frame's suspendable is fixed for the duration of this evaluation (nested calls
-        // balance their context push/pop), so capture it once and probe the reference instead
-        // of re-reading the execution context after every sub-expression.
+        // The frame's suspendable is fixed for this expression evaluation. Ordinary child calls
+        // temporarily push their own frame, then restore this one before returning.
         var suspendable = engine.ExecutionContext.Suspendable;
+        var hostFrame = suspendable as HostContinuationFrame;
+
+        HostCallSuspendData? hostCallData = null;
+        if (hostFrame is { IsResuming: true }
+            && hostFrame.Data.TryGet(_hostCallStateKey, out hostCallData))
+        {
+            if (hostCallData!.Stage is HostCallSuspendStage.Operation or HostCallSuspendStage.Child)
+            {
+                return ResumeHostCall(context, hostFrame, hostCallData);
+            }
+        }
 
         object reference;
         Reference? referenceRecord;
         JsValue func;
         JsValue thisObject;
 
-        // Fast path: obj.method() / this.method() where the receiver is a plain identifier or `this`
-        // and the property is a literal name. Reuse the member expression's own-property inline cache
-        // to resolve the callee and `this` without renting a Reference. Only callables take the fast
-        // path; a non-callable result falls through to the Reference path so the exact "Property 'x'
-        // of object is not a function" error and this-binding are preserved (the identifier/`this`
-        // receiver is side-effect-free, so re-evaluating it on that rare path is unobservable).
-        JsValue? fastFunc = null;
-        var fastThis = JsValue.Undefined;
-        if (_calleeExpression is JintMemberExpression member
-            && member.IsFastCallEligible
-            && !engine._customResolver)
+        if (hostCallData?.Stage == HostCallSuspendStage.Arguments)
         {
-            fastFunc = member.GetCalleeForCall(context, out fastThis);
-            if (suspendable is not null && suspendable.IsSuspended)
-            {
-                return fastFunc;
-            }
-            if (fastFunc is not ICallable)
-            {
-                fastFunc = null;
-            }
-        }
-
-        if (fastFunc is not null)
-        {
-            func = fastFunc;
-            thisObject = fastThis;
-            referenceRecord = null;
-            reference = fastFunc;
+            reference = hostCallData.Reference!;
+            referenceRecord = hostCallData.ReferenceRecord;
+            func = hostCallData.Function!;
+            thisObject = hostCallData.ThisObject;
         }
         else
         {
-            var calleeReference = _calleeExpression.Evaluate(context);
-
-            // Check for generator suspension after evaluating callee
-            if (suspendable is not null && suspendable.IsSuspended)
+            // Fast path: obj.method() / this.method() where the receiver is a plain identifier or
+            // `this` and the property is a literal name.
+            JsValue? fastFunc = null;
+            var fastThis = JsValue.Undefined;
+            if (_calleeExpression is JintMemberExpression member
+                && member.IsFastCallEligible
+                && !engine._customResolver)
             {
-                return calleeReference as JsValue ?? JsValue.Undefined;
-            }
-
-            if (ReferenceEquals(calleeReference, JsValue.Undefined))
-            {
-                return JsValue.Undefined;
-            }
-
-            func = engine.GetValue(calleeReference, false);
-
-            if (func.IsNullOrUndefined() && _expression.IsOptional())
-            {
-                return JsValue.Undefined;
-            }
-
-            referenceRecord = calleeReference as Reference;
-            if (ReferenceEquals(func, engine.Realm.Intrinsics.Eval)
-                && referenceRecord != null
-                && !referenceRecord.IsPropertyReference
-                && CommonProperties.Eval.Equals(referenceRecord.ReferencedName))
-            {
-                return HandleEval(context, func, engine, referenceRecord);
-            }
-
-            // https://tc39.es/ecma262/#sec-evaluatecall
-
-            if (referenceRecord is not null)
-            {
-                if (referenceRecord.IsPropertyReference)
+                fastFunc = member.GetCalleeForCall(context, out fastThis);
+                if (suspendable is not null && suspendable.IsSuspended)
                 {
-                    thisObject = referenceRecord.ThisValue;
+                    return fastFunc;
                 }
-                else
+                if (fastFunc is not ICallable)
                 {
-                    var baseValue = referenceRecord.Base;
-
-                    // deviation from the spec to support null-propagation helper
-                    if (baseValue.IsNullOrUndefined()
-                        && engine._referenceResolver.TryUnresolvableReference(engine, referenceRecord, out var value))
-                    {
-                        thisObject = value;
-                    }
-                    else
-                    {
-                        var refEnv = (Environment) baseValue;
-                        thisObject = refEnv.WithBaseObject();
-                    }
+                    fastFunc = null;
                 }
+            }
+
+            if (fastFunc is not null)
+            {
+                func = fastFunc;
+                thisObject = fastThis;
+                referenceRecord = null;
+                reference = fastFunc;
             }
             else
             {
-                thisObject = JsValue.Undefined;
-            }
+                var calleeReference = _calleeExpression.Evaluate(context);
+                if (suspendable is not null && suspendable.IsSuspended)
+                {
+                    return calleeReference as JsValue ?? JsValue.Undefined;
+                }
 
-            reference = calleeReference;
+                if (ReferenceEquals(calleeReference, JsValue.Undefined))
+                {
+                    return JsValue.Undefined;
+                }
+
+                func = engine.GetValue(calleeReference, false);
+                if (func.IsNullOrUndefined() && _expression.IsOptional())
+                {
+                    return JsValue.Undefined;
+                }
+
+                referenceRecord = calleeReference as Reference;
+                var isDirectEval = ReferenceEquals(func, engine.Realm.Intrinsics.Eval)
+                    && referenceRecord is not null
+                    && !referenceRecord.IsPropertyReference
+                    && CommonProperties.Eval.Equals(referenceRecord.ReferencedName);
+
+                if (isDirectEval)
+                {
+                    if (hostFrame is not null)
+                    {
+                        engine._referencePool.Return(referenceRecord);
+                        Throw.Error(
+                            engine,
+                            "Direct eval is not supported inside an implicit host-continuation call chain.");
+                    }
+                    return HandleEval(context, func, engine, referenceRecord!);
+                }
+
+                if (hostFrame is not null && ReferenceEquals(func, engine.Realm.Intrinsics.Eval))
+                {
+                    engine._referencePool.Return(referenceRecord);
+                    Throw.Error(
+                        engine,
+                        "Indirect eval is not supported inside an implicit host-continuation call chain.");
+                }
+
+                if (referenceRecord is not null)
+                {
+                    if (referenceRecord.IsPropertyReference)
+                    {
+                        thisObject = referenceRecord.ThisValue;
+                    }
+                    else
+                    {
+                        var baseValue = referenceRecord.Base;
+                        if (baseValue.IsNullOrUndefined()
+                            && engine._referenceResolver.TryUnresolvableReference(engine, referenceRecord, out var value))
+                        {
+                            thisObject = value;
+                        }
+                        else
+                        {
+                            var refEnv = (Environment) baseValue;
+                            thisObject = refEnv.WithBaseObject();
+                        }
+                    }
+                }
+                else
+                {
+                    thisObject = JsValue.Undefined;
+                }
+
+                reference = calleeReference;
+            }
         }
 
-        var tailCall = IsInTailPosition((CallExpression) _expression);
-
-        var arguments = this._arguments.ArgumentListEvaluation(context, this, out var rented);
-
-        // Check for generator suspension after argument evaluation
+        var arguments = _arguments.ArgumentListEvaluation(context, this, out var rented);
         if (suspendable is not null && suspendable.IsSuspended)
         {
-            // When suspended mid-arglist, ExpressionCache keeps the array alive
-            // in suspend data and returns rented=false, so we don't release it here.
-            if (rented && arguments is not null)
+            if (hostFrame is not null)
+            {
+                hostCallData ??= hostFrame.Data.GetOrCreate<HostCallSuspendData>(_hostCallStateKey);
+                if (hostCallData.Stage == HostCallSuspendStage.None)
+                {
+                    hostCallData.Stage = HostCallSuspendStage.Arguments;
+                    hostCallData.Reference = reference;
+                    hostCallData.ReferenceRecord = referenceRecord;
+                    hostCallData.Function = func;
+                    hostCallData.ThisObject = thisObject;
+                }
+            }
+
+            // ExpressionCache owns a suspended argument buffer and deliberately reports rented=false.
+            if (rented)
             {
                 engine._jsValueArrayPool.ReturnArray(arguments);
             }
-            return func; // Return any value, caller will check Suspended
+            return func;
         }
 
         if (!func.IsObject() && !engine._referenceResolver.TryGetCallable(engine, reference, out func))
         {
+            ReleaseCallEvaluationResources(engine, referenceRecord, arguments, rented);
+            ClearHostArgumentCallData(hostFrame, hostCallData);
             ThrowMemberIsNotFunction(referenceRecord, reference, engine);
         }
 
         var callable = func as ICallable;
         if (callable is null)
         {
+            ReleaseCallEvaluationResources(engine, referenceRecord, arguments, rented);
+            ClearHostArgumentCallData(hostFrame, hostCallData);
             ThrowReferenceNotFunction(referenceRecord, reference, engine);
         }
 
-        if (tailCall)
-        {
-            // TODO tail call
-            // PrepareForTailCall();
-        }
-
-        // ensure logic is in sync between Call, Construct and JintCallExpression!
-
+        HostOperation? pendingOperation = null;
+        HostContinuationFrame? pendingChild = null;
         JsValue result;
-        if (callable is Function functionInstance)
+        try
         {
-            var callStack = engine.CallStack;
-            var recursionDepth = callStack.Push(functionInstance, _calleeExpression, engine.ExecutionContext);
-
-            if (recursionDepth > engine.Options.Constraints.MaxRecursionDepth)
+            if (callable is Function functionInstance)
             {
-                // automatically pops the current element as it was never reached
-                Throw.RecursionDepthOverflowException(callStack);
-            }
-
-            try
-            {
-                result = functionInstance.Call(thisObject, arguments);
-            }
-            finally
-            {
-                // if call stack was reset due to recursive call to engine or similar, we might not have it anymore
-                if (callStack.Count > 0)
+                var callStack = engine.CallStack;
+                var recursionDepth = callStack.Push(functionInstance, _calleeExpression, engine.ExecutionContext);
+                if (recursionDepth > engine.Options.Constraints.MaxRecursionDepth)
                 {
-                    callStack.Pop();
+                    Throw.RecursionDepthOverflowException(callStack);
+                }
+
+                try
+                {
+                    result = hostFrame is not null
+                        && functionInstance is ScriptFunction { CanUseHostContinuation: true } scriptFunction
+                            ? scriptFunction.CallWithHostContinuation(thisObject, arguments, hostFrame)
+                            : functionInstance.Call(thisObject, arguments);
+                }
+                finally
+                {
+                    if (callStack.Count > 0)
+                    {
+                        callStack.Pop();
+                    }
+                }
+            }
+            else
+            {
+                result = callable.Call(thisObject, arguments);
+            }
+
+            if (hostFrame is not null)
+            {
+                if (hostFrame.TryTakePendingOperation(out var operation))
+                {
+                    pendingOperation = operation;
+                }
+                else if (hostFrame.TryTakePendingChild(out var child))
+                {
+                    pendingChild = child;
+                }
+                else if (hostFrame.IsSuspended)
+                {
+                    Throw.InvalidOperationException(
+                        "A host continuation frame suspended without an operation or child logical frame.");
                 }
             }
         }
-        else
+        catch
         {
-            result = callable.Call(thisObject, arguments);
+            ClearHostArgumentCallData(hostFrame, hostCallData);
+            throw;
+        }
+        finally
+        {
+            if (rented)
+            {
+                engine._jsValueArrayPool.ReturnArray(arguments);
+            }
+            engine._referencePool.Return(referenceRecord);
         }
 
+        if (hostFrame is not null && pendingOperation is not null)
+        {
+            hostCallData ??= hostFrame.Data.GetOrCreate<HostCallSuspendData>(_hostCallStateKey);
+            hostCallData.ClearCallTarget();
+            hostCallData.Stage = HostCallSuspendStage.Operation;
+            hostCallData.Operation = pendingOperation;
+            hostFrame.TrackSuspendedOperation(pendingOperation);
+            hostFrame.Suspend(this);
+            return result;
+        }
+
+        if (hostFrame is not null && pendingChild is not null)
+        {
+            hostCallData ??= hostFrame.Data.GetOrCreate<HostCallSuspendData>(_hostCallStateKey);
+            hostCallData.ClearCallTarget();
+            hostCallData.Stage = HostCallSuspendStage.Child;
+            hostCallData.ChildFrame = pendingChild;
+            hostFrame.TrackSuspendedChild(pendingChild);
+            hostFrame.Suspend(this);
+            return result;
+        }
+
+        ClearHostArgumentCallData(hostFrame, hostCallData);
+        return result;
+    }
+
+    private JsValue ResumeHostCall(
+        EvaluationContext context,
+        HostContinuationFrame hostFrame,
+        HostCallSuspendData data)
+    {
+        var engine = context.Engine;
+        if (data.Stage == HostCallSuspendStage.Operation)
+        {
+            var operation = data.Operation
+                ?? throw new InvalidOperationException("The suspended host call has no operation.");
+
+            hostFrame.Data.Clear(_hostCallStateKey);
+            hostFrame.ReleaseSuspendedOperation(operation);
+            hostFrame.ConsumeResumePoint(this);
+            return operation.ConsumeAndConvert(engine);
+        }
+
+        if (data.Stage != HostCallSuspendStage.Child || data.ChildFrame is null)
+        {
+            throw new InvalidOperationException("The suspended host call has an invalid resume state.");
+        }
+
+        var childFrame = data.ChildFrame;
+        var function = childFrame.Function
+            ?? throw new InvalidOperationException("The suspended child frame has no script function.");
+        var callStack = engine.CallStack;
+        var recursionDepth = callStack.Push(function, _calleeExpression, engine.ExecutionContext);
+        if (recursionDepth > engine.Options.Constraints.MaxRecursionDepth)
+        {
+            Throw.RecursionDepthOverflowException(callStack);
+        }
+
+        JsValue result;
+        try
+        {
+            result = function.ResumeHostContinuation(childFrame);
+        }
+        catch
+        {
+            hostFrame.Data.Clear(_hostCallStateKey);
+            hostFrame.ReleaseSuspendedChild(childFrame);
+            hostFrame.ConsumeResumePoint(this);
+            throw;
+        }
+        finally
+        {
+            if (callStack.Count > 0)
+            {
+                callStack.Pop();
+            }
+        }
+
+        if (childFrame.IsSuspended)
+        {
+            // The child reached another host effect. Keep the same call-site state and unwind the
+            // parent again; the next owner-thread turn will re-enter this branch recursively.
+            hostFrame.Suspend(this);
+            return JsValue.Undefined;
+        }
+
+        hostFrame.Data.Clear(_hostCallStateKey);
+        hostFrame.ReleaseSuspendedChild(childFrame);
+        hostFrame.ConsumeResumePoint(this);
+        return result;
+    }
+
+    private static void ReleaseCallEvaluationResources(
+        Engine engine,
+        Reference? referenceRecord,
+        JsValue[] arguments,
+        bool rented)
+    {
         if (rented)
         {
             engine._jsValueArrayPool.ReturnArray(arguments);
         }
-
         engine._referencePool.Return(referenceRecord);
-        return result;
+    }
+
+    private void ClearHostArgumentCallData(
+        HostContinuationFrame? hostFrame,
+        HostCallSuspendData? data)
+    {
+        if (hostFrame is not null && data?.Stage == HostCallSuspendStage.Arguments)
+        {
+            hostFrame.Data.Clear(_hostCallStateKey);
+        }
     }
 
     [DoesNotReturn]

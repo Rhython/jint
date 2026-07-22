@@ -6,6 +6,7 @@ using Jint.Native.AsyncGenerator;
 using Jint.Native.Disposable;
 using Jint.Native.Generator;
 using Jint.Native.Promise;
+using Jint.Runtime.Continuations;
 using Jint.Runtime.Environments;
 using Jint.Runtime.Interpreter.Expressions;
 
@@ -106,6 +107,62 @@ internal sealed class JintFunctionDefinition
 
         argumentsInstance?.FunctionWasCalled();
         return result;
+    }
+
+    /// <summary>
+    /// Evaluates an ordinary function body as a resumable logical frame for the implicit
+    /// host-continuation runtime. FunctionDeclarationInstantiation is performed exactly once;
+    /// the body itself is re-entered using the frame's per-invocation suspend data.
+    /// </summary>
+    internal Completion EvaluateHostContinuationBody(
+        EvaluationContext context,
+        Function functionObject,
+        JsCallArguments argumentsList,
+        State state,
+        HostContinuationFrame frame)
+    {
+        if (Function.Async || Function.Generator)
+        {
+            Throw.InvalidOperationException(
+                "Async functions and generators cannot use the implicit host-continuation body path.");
+        }
+
+        if (!frame.BindingsInitialized)
+        {
+            var argumentsInstance = context.Engine.FunctionDeclarationInstantiation(
+                context,
+                functionObject,
+                argumentsList,
+                state);
+
+            // Parameter initializers are evaluated inside FDI, which is not currently decomposed into
+            // resumable phases. Reject rather than silently continue with a partially initialized frame.
+            if (frame.IsSuspended)
+            {
+                Throw.Error(
+                    context.Engine,
+                    "Implicit host continuation cannot suspend while initializing function parameters.");
+            }
+
+            frame.ArgumentsInstance = argumentsInstance;
+            frame.BindingsInitialized = true;
+        }
+
+        if (Function.Body is not FunctionBody)
+        {
+            _bodyExpression ??= JintExpression.Build((Expression) Function.Body);
+            context.RunBeforeExecuteStatementChecks(Function.Body);
+            var value = _bodyExpression.GetValue(context);
+            if (frame.IsSuspended)
+            {
+                return new Completion(CompletionType.Normal, value, _bodyExpression._expression);
+            }
+
+            return new Completion(CompletionType.Return, value.Clone(), _bodyExpression._expression);
+        }
+
+        _bodyStatementList ??= new JintStatementList(Function);
+        return _bodyStatementList.Execute(context);
     }
 
     /// <summary>

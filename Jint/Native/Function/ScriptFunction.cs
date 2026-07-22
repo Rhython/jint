@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using Jint.Native.Object;
 using Jint.Runtime;
+using Jint.Runtime.Continuations;
 using Jint.Runtime.Descriptors;
 using Jint.Runtime.Environments;
 using Jint.Runtime.Interpreter;
@@ -277,6 +278,128 @@ public sealed class ScriptFunction : Function, IConstructor
             }
 
             return Undefined;
+        }
+    }
+
+    /// <summary>
+    /// Whether this ordinary script function can participate in the experimental implicit
+    /// host-continuation call chain. Async functions and generators retain their standard
+    /// ECMAScript suspension semantics; class constructors are a hard boundary.
+    /// </summary>
+    internal bool CanUseHostContinuation =>
+        !_isClassConstructor
+        && !_functionDefinition!.Function.Async
+        && !_functionDefinition.Function.Generator;
+
+    /// <summary>
+    /// Invokes an ordinary script function as a child logical frame of an implicit
+    /// host-continuation run.
+    /// </summary>
+    internal JsValue CallWithHostContinuation(
+        JsValue thisObject,
+        JsCallArguments arguments,
+        HostContinuationFrame parentFrame)
+    {
+        if (!CanUseHostContinuation)
+        {
+            Throw.Error(
+                _engine,
+                "Only ordinary non-async, non-generator script functions can participate in an implicit host continuation.");
+        }
+
+        var definition = _functionDefinition!;
+        var state = definition.Initialize();
+        var frame = parentFrame.CreateChild(this, definition, state);
+        var strict = definition.Strict || _thisMode == FunctionThisMode.Strict;
+
+        using (new StrictModeScope(strict, force: true))
+        {
+            ref readonly var calleeContext = ref PrepareForOrdinaryCall(Undefined, state, frame);
+
+            if (!state.CanSkipThisBinding || _engine._isDebugMode)
+            {
+                OrdinaryCallBindThis(calleeContext, thisObject);
+            }
+
+            var result = ExecuteHostContinuationFrame(frame, arguments);
+            if (frame.IsSuspended)
+            {
+                parentFrame.SetPendingChild(frame);
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Re-enters a previously suspended ordinary script function on the Engine owner thread.
+    /// </summary>
+    internal JsValue ResumeHostContinuation(HostContinuationFrame frame)
+    {
+        if (!ReferenceEquals(frame.Function, this)
+            || !ReferenceEquals(frame.Definition, _functionDefinition)
+            || frame.FunctionState is null)
+        {
+            Throw.InvalidOperationException("The host continuation frame does not belong to this script function.");
+        }
+
+        var strict = _functionDefinition!.Strict || _thisMode == FunctionThisMode.Strict;
+        using (new StrictModeScope(strict, force: true))
+        {
+            frame.PrepareResume();
+            _engine.EnterExecutionContext(frame.TakeSavedContext());
+            return ExecuteHostContinuationFrame(frame, Arguments.Empty);
+        }
+    }
+
+    private JsValue ExecuteHostContinuationFrame(
+        HostContinuationFrame frame,
+        JsCallArguments arguments)
+    {
+        var contextActive = true;
+        try
+        {
+            var context = _engine._activeEvaluationContext ?? new EvaluationContext(_engine);
+            var result = frame.Definition!.EvaluateHostContinuationBody(
+                context,
+                this,
+                arguments,
+                frame.FunctionState!,
+                frame);
+
+            if (frame.IsSuspended)
+            {
+                frame.CaptureContext(_engine.ExecutionContext);
+                _engine.LeaveExecutionContext();
+                contextActive = false;
+                return Undefined;
+            }
+
+            result = _engine.ExecutionContext.LexicalEnvironment.DisposeResources(result);
+            if (result.Type == CompletionType.Throw)
+            {
+                Throw.JavaScriptException(_engine, result.Value, result);
+            }
+
+            var value = result.Type == CompletionType.Return ? result.Value : Undefined;
+            if (context.DebugMode)
+            {
+                _engine.Debugger.OnReturnPoint(_functionDefinition!.Function.Body, value);
+            }
+
+            frame.Complete(value);
+            return value;
+        }
+        catch
+        {
+            frame.Abort();
+            throw;
+        }
+        finally
+        {
+            if (contextActive)
+            {
+                _engine.LeaveExecutionContext();
+            }
         }
     }
 

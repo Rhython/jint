@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+  </packageSources>
+  <config>
+    <!-- Replace with the extracted global packages folder. -->
+    <add key="globalPackagesFolder" value="/absolute/path/to/nuget-offline/packages" />
+  </config>
+</configuration>

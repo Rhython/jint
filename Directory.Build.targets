@@ -1,0 +1,50 @@
+<Project>
+  <!--
+    Offline/audit build compatibility switch.
+    The supplied .NET 10.0.100 SDK hosts Roslyn 5.0 while this source snapshot pins
+    Microsoft.CodeAnalysis 5.6 for its source-generator project. When explicitly enabled,
+    compile the source generator against the SDK-hosted Roslyn assemblies so the resulting
+    analyzer is loadable by the same compiler. Runtime Jint assemblies are unaffected.
+  -->
+  <ItemGroup Condition="'$(OfflineUseSdkRoslyn)' == 'true' and '$(MSBuildProjectName)' == 'Jint.SourceGenerators'">
+    <PackageReference Remove="Microsoft.CodeAnalysis.CSharp" />
+    <PackageReference Remove="Microsoft.CodeAnalysis.Analyzers" />
+    <Reference Include="Microsoft.CodeAnalysis">
+      <HintPath>$(MSBuildToolsPath)/Roslyn/bincore/Microsoft.CodeAnalysis.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.CodeAnalysis.CSharp">
+      <HintPath>$(MSBuildToolsPath)/Roslyn/bincore/Microsoft.CodeAnalysis.CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(OfflineUseSdkRoslyn)' == 'true'">
+    <!-- Preserve each project's existing suppressions and add only the audited offline pack fallback. -->
+    <NoWarn>$(NoWarn);NU1603</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    The uploaded offline cache contains the 10.0.9 servicing runtime/AOT packs while the
+    uploaded 10.0.100 SDK metadata requests the 10.0.0 RTM packs exactly. This explicit,
+    opt-in metadata override keeps targeting references at the SDK's 10.0.0 version and
+    selects only the available servicing runtime/tool packs for RID restore and NativeAOT.
+  -->
+  <ItemGroup Condition="'$(OfflineUseServicingPacks)' == 'true'">
+    <KnownFrameworkReference Update="Microsoft.NETCore.App"
+                             DefaultRuntimeFrameworkVersion="10.0.9"
+                             LatestRuntimeFrameworkVersion="10.0.9" />
+    <KnownFrameworkReference Update="Microsoft.AspNetCore.App"
+                             DefaultRuntimeFrameworkVersion="10.0.9"
+                             LatestRuntimeFrameworkVersion="10.0.9" />
+    <KnownAppHostPack Update="Microsoft.NETCore.App"
+                      AppHostPackVersion="10.0.9" />
+    <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler"
+                         ILCompilerPackVersion="10.0.9" />
+    <KnownRuntimePack Update="Microsoft.NETCore.App"
+                      LatestRuntimeFrameworkVersion="10.0.9" />
+    <KnownILLinkPack Update="Microsoft.NET.ILLink.Tasks"
+                     ILLinkPackVersion="10.0.9" />
+  </ItemGroup>
+
+</Project>

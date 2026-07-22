@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Jint.Native.Object;
 using Jint.Runtime;
+using Jint.Runtime.Continuations;
 using Jint.Runtime.Descriptors;
 using Jint.Runtime.Environments;
 using Jint.Runtime.Interpreter;
@@ -483,7 +484,10 @@ public abstract partial class Function : ObjectInstance, ICallable
     /// https://tc39.es/ecma262/#sec-prepareforordinarycall
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref readonly ExecutionContext PrepareForOrdinaryCall(JsValue newTarget, JintFunctionDefinition.State state)
+    internal ref readonly ExecutionContext PrepareForOrdinaryCall(
+        JsValue newTarget,
+        JintFunctionDefinition.State state,
+        HostContinuationFrame? hostContinuationFrame = null)
     {
         var localEnv = JintEnvironment.NewFunctionEnvironment(_engine, this, newTarget, state);
         var calleeRealm = _realm;
@@ -495,7 +499,8 @@ public abstract partial class Function : ObjectInstance, ICallable
             _privateEnvironment,
             calleeRealm,
             generator: null,
-            function: this);
+            function: this,
+            hostContinuationFrame: hostContinuationFrame);
 
         // If callerContext is not already suspended, suspend callerContext.
         // Push calleeContext onto the execution context stack; calleeContext is now the running execution context.

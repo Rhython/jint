@@ -398,6 +398,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     public Engine SetValue(string name, Delegate value)
     {
+        VerifyHostContinuationThreadAccess();
         Realm.GlobalObject.FastSetProperty(name, new PropertyDescriptor(new DelegateWrapper(this, value), PropertyFlag.NonEnumerable));
         return this;
     }
@@ -407,6 +408,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     public Engine SetValue(string name, string? value)
     {
+        VerifyHostContinuationThreadAccess();
         return SetValue(name, value is null ? JsValue.Null : JsString.Create(value));
     }
 
@@ -415,6 +417,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     public Engine SetValue(string name, double value)
     {
+        VerifyHostContinuationThreadAccess();
         return SetValue(name, (JsValue) JsNumber.Create(value));
     }
 
@@ -423,6 +426,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     public Engine SetValue(string name, int value)
     {
+        VerifyHostContinuationThreadAccess();
         return SetValue(name, (JsValue) JsNumber.Create(value));
     }
 
@@ -431,6 +435,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     public Engine SetValue(string name, bool value)
     {
+        VerifyHostContinuationThreadAccess();
         return SetValue(name, (JsValue) (value ? JsBoolean.True : JsBoolean.False));
     }
 
@@ -439,6 +444,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     public Engine SetValue(string name, JsValue value)
     {
+        VerifyHostContinuationThreadAccess();
         Realm.GlobalObject.Set(name, value);
         return this;
     }
@@ -448,6 +454,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     public Engine SetValue(string name, object? obj)
     {
+        VerifyHostContinuationThreadAccess();
         var value = obj is Type t
             ? TypeReference.CreateTypeReference(this, t)
             : JsValue.FromObject(this, obj);
@@ -460,6 +467,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     public Engine SetValue(string name, [DynamicallyAccessedMembers(InteropHelper.DefaultDynamicallyAccessedMemberTypes)] Type type)
     {
+        VerifyHostContinuationThreadAccess();
 #pragma warning disable IL2111
         return SetValue(name, TypeReference.CreateTypeReference(this, type));
 #pragma warning restore IL2111
@@ -470,6 +478,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     public Engine SetValue<[DynamicallyAccessedMembers(InteropHelper.DefaultDynamicallyAccessedMemberTypes)] T>(string name, T? obj)
     {
+        VerifyHostContinuationThreadAccess();
         return obj is Type t
             ? SetValue(name, t)
             : SetValue(name, JsValue.FromObject(this, obj));
@@ -756,6 +765,7 @@ public sealed partial class Engine : IDisposable
 
     internal void RunAvailableContinuations()
     {
+        VerifyHostContinuationThreadAccess();
         _eventLoop.RunAvailableContinuations(this);
     }
 
@@ -1196,6 +1206,7 @@ public sealed partial class Engine : IDisposable
 
     internal T ExecuteWithConstraints<T>(bool strict, Func<T> callback)
     {
+        VerifyHostContinuationThreadAccess();
         ResetConstraints();
 
         var ownsContext = _activeEvaluationContext is null;
@@ -1261,6 +1272,7 @@ public sealed partial class Engine : IDisposable
     /// <param name="propertyName">The name of the property to return.</param>
     public JsValue GetValue(string propertyName)
     {
+        VerifyHostContinuationThreadAccess();
         return GetValue(Realm.GlobalObject, new JsString(propertyName));
     }
 
@@ -1279,6 +1291,7 @@ public sealed partial class Engine : IDisposable
     /// <param name="property">The name of the property to return.</param>
     public JsValue GetValue(JsValue scope, JsValue property)
     {
+        VerifyHostContinuationThreadAccess();
         var reference = _referencePool.Rent(scope, property, _isStrict, thisValue: null);
         var jsValue = GetValue(reference, returnReferenceToPool: false);
         _referencePool.Return(reference);
@@ -2217,6 +2230,18 @@ public sealed partial class Engine : IDisposable
 
     public void Dispose()
     {
+        if (_activeHostContinuationRun is { } run)
+        {
+            run.VerifyOwnerThread();
+            if (run.IsSliceRunning)
+            {
+                Throw.InvalidOperationException(
+                    "The Engine cannot be disposed while an implicit host-continuation execution slice is running.");
+            }
+
+            FailHostContinuationRun(run, new ObjectDisposedException(nameof(Engine)));
+        }
+
         if (_objectWrapperCache is null)
         {
             return;

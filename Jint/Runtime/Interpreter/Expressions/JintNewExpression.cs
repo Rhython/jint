@@ -1,5 +1,6 @@
 using Jint.Native;
 using Jint.Native.Function;
+using Jint.Runtime.Continuations;
 
 namespace Jint.Runtime.Interpreter.Expressions;
 
@@ -8,6 +9,7 @@ internal sealed class JintNewExpression : JintExpression
     private readonly ExpressionCache _arguments = new();
     private readonly JintExpression _calleeExpression;
     private readonly bool _zeroArgs;
+    private readonly object _hostNewStateKey = new();
 
     // Monomorphic call-site cache: the constructor object seen by the last evaluation.
     // Identity pins the realm and the immutable per-instance IsConstructor /
@@ -30,8 +32,20 @@ internal sealed class JintNewExpression : JintExpression
     {
         var engine = context.Engine;
 
-        // todo: optimize by defining a common abstract class or interface
-        var jsValue = _calleeExpression.GetValue(context);
+        var hostFrame = engine.ExecutionContext.Suspendable as HostContinuationFrame;
+        HostNewSuspendData? hostData = null;
+
+        JsValue jsValue;
+        if (hostFrame is { IsResuming: true }
+            && hostFrame.Data.TryGet(_hostNewStateKey, out hostData))
+        {
+            jsValue = hostData!.Constructor;
+        }
+        else
+        {
+            // todo: optimize by defining a common abstract class or interface
+            jsValue = _calleeExpression.GetValue(context);
+        }
 
         var isCachedConstructor = ReferenceEquals(jsValue, _cachedConstructor);
         if (isCachedConstructor
@@ -58,13 +72,20 @@ internal sealed class JintNewExpression : JintExpression
 
         if (context.IsSuspended())
         {
-            // Argument list suspended mid-evaluation. ExpressionCache keeps the buffer
-            // alive in suspend data and returns rented=false.
+            // Argument list suspended mid-evaluation. ExpressionCache keeps the buffer alive.
+            // Preserve the already-resolved constructor as well, so a getter/proxy callee is not
+            // observed a second time when the owner thread resumes.
+            if (hostFrame is not null)
+            {
+                hostData ??= hostFrame.Data.GetOrCreate<HostNewSuspendData>(_hostNewStateKey);
+                hostData.Constructor = jsValue;
+            }
             return jsValue;
         }
 
         if (!isCachedConstructor && !jsValue.IsConstructor)
         {
+            hostFrame?.Data.Clear(_hostNewStateKey);
             Throw.TypeError(engine.Realm, $"{_calleeExpression.SourceText} is not a constructor");
         }
 
@@ -82,6 +103,7 @@ internal sealed class JintNewExpression : JintExpression
             _cachedLeafZeroArg = _zeroArgs && function.IsZeroArgLeafConstructor && function is IConstructor;
         }
 
+        hostFrame?.Data.Clear(_hostNewStateKey);
         return instance;
     }
 }

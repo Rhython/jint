@@ -390,6 +390,18 @@ internal sealed class SuspendDataDictionary
     }
 
     /// <summary>
+    /// Clears every saved resume position and all construct-specific suspend data owned by one
+    /// logical invocation. Used when an implicit host-continuation frame completes or is abandoned.
+    /// </summary>
+    public void ClearAll()
+    {
+        _positionKey = null;
+        _position = 0;
+        _morePositions?.Clear();
+        _suspendData?.Clear();
+    }
+
+    /// <summary>
     /// Gets or creates suspend data of the specified type (for constructs without iterators).
     /// </summary>
     public T GetOrCreate<T>(object key, IteratorInstance? iteratorInstance = null) where T : SuspendData, new()
