@@ -78,8 +78,9 @@ internal sealed class ExpressionCache
 
         JsValue[] arguments;
         int startIndex;
+        ExpressionBufferSuspendData? suspendData = null;
         if (suspendable is { IsResuming: true }
-            && suspendable.Data.TryGet(key, out ExpressionBufferSuspendData? suspendData))
+            && suspendable.Data.TryGet(key, out suspendData))
         {
             // Resume: reuse the partially-filled buffer so already-evaluated
             // arguments (which may have observable side effects) are not re-evaluated.
@@ -102,12 +103,19 @@ internal sealed class ExpressionCache
                 var data = suspendable.Data.GetOrCreate<ExpressionBufferSuspendData>(key);
                 data.Buffer = arguments;
                 data.NextIndex = nextIndex;
+                data.Rented = true;
             }
 
             return arguments;
         }
 
         // Completed normally — caller now owns the array and should return it to the pool.
+        if (suspendData is not null)
+        {
+            suspendData.Buffer = [];
+            suspendData.NextIndex = 0;
+            suspendData.Rented = false;
+        }
         suspendable?.Data.Clear(key);
         rented = true;
         return arguments;

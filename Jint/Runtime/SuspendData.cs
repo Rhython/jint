@@ -17,6 +17,15 @@ internal abstract class SuspendData
     /// Null for constructs that don't use iterators (e.g., regular for loops).
     /// </summary>
     public IteratorInstance? Iterator { get; set; }
+
+    /// <summary>
+    /// Releases resources retained by an abandoned logical invocation.
+    /// Normal completion transfers ownership before removing the suspend data.
+    /// </summary>
+    internal virtual void Cleanup(Engine engine)
+    {
+        Iterator = null;
+    }
 }
 
 /// <summary>
@@ -147,6 +156,15 @@ internal sealed class AssignmentSuspendData : SuspendData
     public Reference Lref { get; set; } = null!;
 
     public JsValue OriginalLeftValue { get; set; } = JsValue.Undefined;
+
+    internal override void Cleanup(Engine engine)
+    {
+        var lref = Lref;
+        Lref = null!;
+        OriginalLeftValue = JsValue.Undefined;
+        engine._referencePool.Return(lref);
+        base.Cleanup(engine);
+    }
 }
 
 /// <summary>
@@ -160,6 +178,27 @@ internal sealed class ExpressionBufferSuspendData : SuspendData
     public JsValue[] Buffer { get; set; } = [];
 
     public int NextIndex { get; set; }
+
+    public bool Rented { get; set; }
+
+    internal override void Cleanup(Engine engine)
+    {
+        var buffer = Buffer;
+        Buffer = [];
+        NextIndex = 0;
+
+        if (buffer.Length != 0)
+        {
+            Array.Clear(buffer, 0, buffer.Length);
+            if (Rented)
+            {
+                engine._jsValueArrayPool.ReturnArray(buffer);
+            }
+        }
+
+        Rented = false;
+        base.Cleanup(engine);
+    }
 }
 
 /// <summary>
@@ -173,6 +212,13 @@ internal sealed class SpreadArgumentsSuspendData : SuspendData
     public List<JsValue> Target { get; set; } = new();
 
     public int NextExpressionIndex { get; set; }
+
+    internal override void Cleanup(Engine engine)
+    {
+        Target.Clear();
+        NextExpressionIndex = 0;
+        base.Cleanup(engine);
+    }
 }
 
 /// <summary>
@@ -237,6 +283,23 @@ internal sealed class TaggedTemplateSuspendData : SuspendData
     public JsValue[] Args { get; set; } = [];
 
     public int NextExpressionIndex { get; set; }
+
+    internal override void Cleanup(Engine engine)
+    {
+        var args = Args;
+        Args = [];
+        Tagger = null!;
+        ThisObject = JsValue.Undefined;
+        NextExpressionIndex = 0;
+
+        if (args.Length != 0)
+        {
+            Array.Clear(args, 0, args.Length);
+            engine._jsValueArrayPool.ReturnArray(args);
+        }
+
+        base.Cleanup(engine);
+    }
 }
 
 /// <summary>
@@ -393,11 +456,19 @@ internal sealed class SuspendDataDictionary
     /// Clears every saved resume position and all construct-specific suspend data owned by one
     /// logical invocation. Used when an implicit host-continuation frame completes or is abandoned.
     /// </summary>
-    public void ClearAll()
+    public void ClearAll(Engine engine)
     {
         _positionKey = null;
         _position = 0;
         _morePositions?.Clear();
+
+        if (_suspendData is not null)
+        {
+            foreach (var data in _suspendData.Values)
+            {
+                data.Cleanup(engine);
+            }
+        }
         _suspendData?.Clear();
     }
 
@@ -428,6 +499,24 @@ internal sealed class SuspendDataDictionary
             data = d;
             return true;
         }
+        data = null;
+        return false;
+    }
+
+    internal bool TryGetForTesting<T>(Predicate<T> predicate, out T? data) where T : SuspendData
+    {
+        if (_suspendData is not null)
+        {
+            foreach (var baseData in _suspendData.Values)
+            {
+                if (baseData is T candidate && predicate(candidate))
+                {
+                    data = candidate;
+                    return true;
+                }
+            }
+        }
+
         data = null;
         return false;
     }

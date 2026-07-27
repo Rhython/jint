@@ -112,7 +112,7 @@ internal sealed class HostContinuationFrame : ISuspendable
         _suspendedChild = null;
         ArgumentsInstance?.FunctionWasCalled();
         ArgumentsInstance = null;
-        Data.ClearAll();
+        Data.ClearAll(Run.Engine);
     }
 
     internal void Abort()
@@ -145,7 +145,7 @@ internal sealed class HostContinuationFrame : ISuspendable
         _suspendedChild = null;
         ArgumentsInstance?.FunctionWasCalled();
         ArgumentsInstance = null;
-        Data.ClearAll();
+        Data.ClearAll(Run.Engine);
     }
 
     internal void SetPendingOperation(HostOperation operation)
@@ -365,6 +365,12 @@ internal sealed class HostOperationCompletion
 internal sealed class HostNewSuspendData : SuspendData
 {
     internal JsValue Constructor { get; set; } = JsValue.Undefined;
+
+    internal override void Cleanup(Engine engine)
+    {
+        Constructor = JsValue.Undefined;
+        base.Cleanup(engine);
+    }
 }
 
 internal enum HostCallSuspendStage : byte
@@ -391,6 +397,16 @@ internal sealed class HostCallSuspendData : SuspendData
         ReferenceRecord = null;
         Function = null;
         ThisObject = JsValue.Undefined;
+    }
+
+    internal override void Cleanup(Engine engine)
+    {
+        engine._referencePool.Return(ReferenceRecord);
+        ClearCallTarget();
+        Stage = HostCallSuspendStage.None;
+        Operation = null;
+        ChildFrame = null;
+        base.Cleanup(engine);
     }
 }
 

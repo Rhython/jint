@@ -28,9 +28,10 @@ internal sealed class JintTaggedTemplateExpression : JintExpression
         JsValue thisObject;
         JsValue[] args;
         int startIndex;
+        TaggedTemplateSuspendData? suspendData = null;
 
         if (suspendable is { IsResuming: true }
-            && suspendable.Data.TryGet(this, out TaggedTemplateSuspendData? suspendData))
+            && suspendable.Data.TryGet(this, out suspendData))
         {
             tagger = suspendData!.Tagger;
             thisObject = suspendData.ThisObject;
@@ -103,6 +104,13 @@ internal sealed class JintTaggedTemplateExpression : JintExpression
 
         var result = tagger.Call(thisObject, args);
 
+        if (suspendData is not null)
+        {
+            suspendData.Args = [];
+            suspendData.Tagger = null!;
+            suspendData.ThisObject = JsValue.Undefined;
+            suspendData.NextExpressionIndex = 0;
+        }
         engine._jsValueArrayPool.ReturnArray(args);
         suspendable?.Data.Clear(this);
 

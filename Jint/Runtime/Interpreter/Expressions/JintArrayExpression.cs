@@ -27,8 +27,9 @@ internal sealed class JintArrayExpression : JintExpression
             var suspendable = engine.ExecutionContext.Suspendable;
             JsValue[] values;
             int startIndex;
+            ExpressionBufferSuspendData? suspendData = null;
             if (suspendable is { IsResuming: true }
-                && suspendable.Data.TryGet(this, out ExpressionBufferSuspendData? suspendData))
+                && suspendable.Data.TryGet(this, out suspendData))
             {
                 // Resume: reuse the partially-filled buffer so already-evaluated
                 // elements (which may have observable side effects) are not re-evaluated.
@@ -52,10 +53,16 @@ internal sealed class JintArrayExpression : JintExpression
                     var data = suspendable.Data.GetOrCreate<ExpressionBufferSuspendData>(this);
                     data.Buffer = values;
                     data.NextIndex = nextIndex;
+                    data.Rented = false;
                 }
                 return JsValue.Undefined;
             }
 
+            if (suspendData is not null)
+            {
+                suspendData.Buffer = [];
+                suspendData.NextIndex = 0;
+            }
             suspendable?.Data.Clear(this);
             return new JsArray(engine, values);
         }

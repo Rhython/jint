@@ -79,8 +79,9 @@ internal sealed class JintAssignmentExpression : JintExpression
         JsValue originalLeftValue;
         Reference lref;
         bool lhsHasSideEffects;
+        AssignmentSuspendData? suspendData = null;
         if (suspendable is { IsResuming: true }
-            && suspendable.Data.TryGet(this, out AssignmentSuspendData? suspendData))
+            && suspendable.Data.TryGet(this, out suspendData))
         {
             // Resuming: skip LHS re-evaluation. The slow path may have observable
             // side effects (obj[++i]), so we reuse the saved Reference + original value.
@@ -214,6 +215,11 @@ internal sealed class JintAssignmentExpression : JintExpression
             engine.PutValue(lref, newLeftValue!);
         }
 
+        if (suspendData is not null)
+        {
+            suspendData.Lref = null!;
+            suspendData.OriginalLeftValue = JsValue.Undefined;
+        }
         engine._referencePool.Return(lref);
         suspendable?.Data.Clear(this);
         return newLeftValue!;
