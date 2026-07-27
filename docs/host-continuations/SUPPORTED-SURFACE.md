@@ -23,6 +23,11 @@
 | inline scheduler 拒绝 | 支持 | `RejectsInlineScheduler` |
 | 错线程 scheduler 不执行 JS | 支持 | `WrongThreadSchedulerFaultsWithoutExecutingJavaScriptThere` |
 | 默认 converter 拒绝后台携带 `JsValue` | 支持 | `DefaultResultConverterRejectsJsValueFromBackgroundContract` |
+| 原生 Module 无挂起及 `Prepared<Module>` | 支持 | `ImportsPreparedModuleWithoutSuspension` |
+| Module 同步/异步完成 host operation | 支持 | `ModuleSynchronousHostCompletionUsesLaterOwnerTurn`、`ModuleDependencyGraphSuspendsAndResumes` |
+| 原生静态依赖图中的 module body 挂起 | 支持 | `ModuleDependencyGraphSuspendsAndResumes` |
+| wrapper module 调用 imported default function 后挂起 | 支持 | `WrapperModuleCanInvokeImportedDefaultFunctionThatSuspends` |
+| Module run overlap、取消与迟到完成 | 支持 | `ModuleRunRejectsOverlapAndCancellationIgnoresLateCompletion` |
 
 ## 2. 明确拒绝边界
 
@@ -39,6 +44,7 @@
 | native stack 耗尽后的 StackGuard 迁移 | 会切到线程池，违反 owner-thread 不变量 |
 | 普通 `Evaluate` 中直接调用 `HostContinuationFunction` | 没有 active run/frame 可保存 |
 | 显式 JS async function/generator 中调用隐式 host function | 两套 suspendable 状态机会冲突，当前拒绝 |
+| Module 依赖图中的 top-level `await` | async-module promise 状态机与隐式 frame 的恢复所有权尚未组合；执行 module body 前拒绝 |
 
 ## 3. 未验证，生产中应暂时禁止
 
@@ -50,7 +56,7 @@
 - `super()` 参数或 class field initializer 中挂起；
 - optional call/chain 的所有复杂组合；
 - tagged template tag 内嵌 native callback 后挂起；
-- dynamic `import()`、ES module top-level evaluation；
+- dynamic `import()` 与隐式 host effect 的组合；
 - ShadowRealm；
 - explicit resource management (`using`/`await using`) 与隐式 host effect 交叉；
 - 极深递归、tail-call 相关路径；

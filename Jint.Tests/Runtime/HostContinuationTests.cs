@@ -613,6 +613,131 @@ public sealed class HostContinuationTests
             });
     }
 
+    [Fact]
+    public void ImportsPreparedModuleWithoutSuspension()
+    {
+        using var scheduler = new ManualOwnerScheduler();
+        var engine = new Engine();
+        var prepared = Engine.PrepareModule("export const result = 42;");
+        engine.Modules.Add("entry", builder => builder.AddModule(prepared));
+
+        var task = engine.ImportModuleWithHostContinuationsAsync(
+            "entry",
+            scheduler,
+            static (_, ns) => ns.AsObject().Get("result").AsNumber());
+
+        Assert.True(task.IsCompletedSuccessfully);
+        Assert.Equal(42, task.GetAwaiter().GetResult());
+    }
+
+    [Fact]
+    public void ModuleSynchronousHostCompletionUsesLaterOwnerTurn()
+    {
+        using var scheduler = new ManualOwnerScheduler();
+        var engine = new Engine();
+        engine.SetValue("host", engine.Advanced.CreateHostContinuationFunction(
+            "host",
+            static (_, _, _) => new ValueTask<object?>("ok"),
+            resultConverter: static (_, value) => JsString.Create((string) value!)));
+        engine.Modules.Add("entry", "export const result = host();");
+
+        var task = engine.ImportModuleWithHostContinuationsAsync(
+            "entry",
+            scheduler,
+            static (_, ns) => ns.AsObject().Get("result").AsString());
+
+        Assert.False(task.IsCompleted);
+        Assert.Equal(1, scheduler.PendingCount);
+        scheduler.RunUntil(() => task.IsCompleted, TestTimeout);
+        Assert.Equal("ok", task.GetAwaiter().GetResult());
+    }
+
+    [Fact]
+    public void ModuleDependencyGraphSuspendsAndResumes()
+    {
+        using var scheduler = new ManualOwnerScheduler();
+        var engine = new Engine();
+        var requests = new Queue<PendingRequest>();
+        engine.SetValue("host", CreateDeferredStringHost(engine, scheduler, requests));
+        engine.Modules.Add("dependency", "export const value = host('dependency');");
+        engine.Modules.Add("entry", "import { value } from 'dependency'; export const result = value + ':entry';");
+
+        var task = engine.ImportModuleWithHostContinuationsAsync(
+            "entry",
+            scheduler,
+            static (_, ns) => ns.AsObject().Get("result").AsString());
+
+        Assert.False(task.IsCompleted);
+        CompleteNext(requests, "host", "dependency", "resolved");
+        scheduler.RunUntil(() => task.IsCompleted, TestTimeout);
+        Assert.Equal("resolved:entry", task.GetAwaiter().GetResult());
+    }
+
+    [Fact]
+    public void WrapperModuleCanInvokeImportedDefaultFunctionThatSuspends()
+    {
+        using var scheduler = new ManualOwnerScheduler();
+        var engine = new Engine();
+        var requests = new Queue<PendingRequest>();
+        engine.SetValue("host", CreateDeferredStringHost(engine, scheduler, requests));
+        engine.Modules.Add("workflow", "export default function run(value) { return host(value) + ':workflow'; }");
+        engine.Modules.Add("entry", "import run from 'workflow'; export const result = run('request');");
+
+        var task = engine.ImportModuleWithHostContinuationsAsync(
+            "entry",
+            scheduler,
+            static (_, ns) => ns.AsObject().Get("result").AsString());
+
+        CompleteNext(requests, "host", "request", "response");
+        scheduler.RunUntil(() => task.IsCompleted, TestTimeout);
+        Assert.Equal("response:workflow", task.GetAwaiter().GetResult());
+    }
+
+    [Fact]
+    public void ModuleRunRejectsOverlapAndCancellationIgnoresLateCompletion()
+    {
+        using var scheduler = new ManualOwnerScheduler();
+        using var cancellation = new CancellationTokenSource();
+        var engine = new Engine();
+        var requests = new Queue<PendingRequest>();
+        engine.SetValue("host", CreateDeferredStringHost(engine, scheduler, requests));
+        engine.Modules.Add("entry", "export const result = host('request');");
+        engine.Modules.Add("other", "export const result = 1;");
+
+        var task = engine.ImportModuleWithHostContinuationsAsync(
+            "entry",
+            scheduler,
+            static (_, ns) => ns.AsObject().Get("result").AsString(),
+            cancellation.Token);
+
+        var overlap = Assert.Throws<InvalidOperationException>(
+            () => { _ = engine.ImportModuleWithHostContinuationsAsync("other", scheduler); });
+        Assert.Contains("active implicit host-continuation run", overlap.Message);
+
+        cancellation.Cancel();
+        scheduler.RunUntil(() => task.IsCompleted, TestTimeout);
+        Assert.ThrowsAny<OperationCanceledException>(() => task.GetAwaiter().GetResult());
+
+        var postCount = scheduler.PostCount;
+        CompleteNext(requests, "host", "request", "late");
+        Thread.Sleep(50);
+        Assert.Equal(postCount, scheduler.PostCount);
+    }
+
+    [Fact]
+    public void ModuleImportRejectsTopLevelAwaitBeforeExecution()
+    {
+        using var scheduler = new ManualOwnerScheduler();
+        var engine = new Engine();
+        engine.Modules.Add("dependency", "await Promise.resolve(); export const value = 1;");
+        engine.Modules.Add("entry", "import { value } from 'dependency'; export { value };");
+
+        var exception = Assert.Throws<NotSupportedException>(
+            () => { _ = engine.ImportModuleWithHostContinuationsAsync("entry", scheduler); });
+
+        Assert.Contains("Top-level await", exception.Message);
+    }
+
     private static void CompleteNext(
         Queue<PendingRequest> requests,
         string expectedName,

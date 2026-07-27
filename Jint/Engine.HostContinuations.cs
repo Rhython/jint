@@ -4,6 +4,7 @@ using Jint.Runtime;
 using Jint.Runtime.Continuations;
 using Jint.Runtime.Environments;
 using Jint.Runtime.Interpreter;
+using Jint.Runtime.Modules;
 using ExecutionContext = Jint.Runtime.Environments.ExecutionContext;
 
 namespace Jint;
@@ -147,6 +148,55 @@ public sealed partial class Engine
             cancellationToken);
     }
 
+    /// <summary>
+    /// Imports and evaluates an ECMAScript module and its native dependency graph using the
+    /// implicit host-continuation runtime.
+    /// </summary>
+    /// <remarks>
+    /// The module must be registered through <see cref="Modules"/> or resolvable by the configured
+    /// module loader. Top-level await is not supported by this execution mode.
+    /// </remarks>
+    public Task<JsValue> ImportModuleWithHostContinuationsAsync(
+        string specifier,
+        IHostContinuationScheduler scheduler,
+        CancellationToken cancellationToken = default)
+    {
+        return ImportModuleWithHostContinuationsAsync(
+            specifier,
+            scheduler,
+            static (_, value) => value,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Imports and evaluates an ECMAScript module and converts its namespace to CLR data on the
+    /// Engine owner thread before completing the returned task.
+    /// </summary>
+    public Task<TResult> ImportModuleWithHostContinuationsAsync<TResult>(
+        string specifier,
+        IHostContinuationScheduler scheduler,
+        Func<Engine, JsValue, TResult> completionConverter,
+        CancellationToken cancellationToken = default)
+    {
+        if (specifier is null)
+        {
+            Throw.ArgumentNullException(nameof(specifier));
+        }
+        if (completionConverter is null)
+        {
+            Throw.ArgumentNullException(nameof(completionConverter));
+        }
+        ValidateHostContinuationStart(scheduler);
+
+        var module = Modules.PrepareHostContinuationImport(specifier);
+        object? ConvertCompletion(Engine engine, JsValue value) => completionConverter(engine, value);
+        var run = new HostContinuationRun(this, scheduler, module, ConvertCompletion, cancellationToken);
+
+        _activeHostContinuationRun = run;
+        RunHostContinuationSlice(run, initial: true);
+        return CastHostContinuationCompletion<TResult>(run.Completion);
+    }
+
     private Task<TResult> EvaluateWithHostContinuationsCore<TResult>(
         in Prepared<Script> preparedScript,
         IHostContinuationScheduler scheduler,
@@ -258,13 +308,43 @@ public sealed partial class Engine
 
             using (new StrictModeScope(run.Strict))
             {
+                if (run.Module is { } module)
+                {
+                    if (!initial)
+                    {
+                        run.Root.PrepareResume();
+                        EnterExecutionContext(run.Root.TakeSavedContext());
+                        contextActive = true;
+                    }
+
+                    Modules.EvaluateHostContinuationImport(module);
+                    if (run.Root.IsSuspended)
+                    {
+                        contextActive = true;
+                        run.Root.CaptureContext(ExecutionContext);
+                        LeaveExecutionContext();
+                        contextActive = false;
+                        RunAvailableContinuations();
+                        return;
+                    }
+
+                    // SourceTextModule leaves its module context after normal completion.
+                    contextActive = false;
+                    var moduleNamespace = Jint.Runtime.Modules.Module.GetModuleNamespace(module);
+                    RunAvailableContinuations();
+                    run.Root.Complete(moduleNamespace);
+                    run.Complete(moduleNamespace);
+                    return;
+                }
+
                 if (initial)
                 {
-                    Debugger.OnBeforeEvaluate(run.ScriptRecord.EcmaScriptCode);
+                    var scriptRecord = run.ScriptRecord!;
+                    Debugger.OnBeforeEvaluate(scriptRecord.EcmaScriptCode);
 
                     var globalEnv = Realm.GlobalEnv;
                     var scriptContext = new ExecutionContext(
-                        run.ScriptRecord,
+                        scriptRecord,
                         lexicalEnvironment: globalEnv,
                         variableEnvironment: globalEnv,
                         privateEnvironment: null,
@@ -275,7 +355,7 @@ public sealed partial class Engine
                     EnterExecutionContext(scriptContext);
                     contextActive = true;
 
-                    var script = run.ScriptRecord.EcmaScriptCode;
+                    var script = scriptRecord.EcmaScriptCode;
                     var reEvaluation = GlobalDeclarationInstantiation(script, globalEnv);
                     run.Body = GetOrBuildScriptStatementList(script, reEvaluation);
                 }

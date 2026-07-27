@@ -12,6 +12,7 @@
 6. 一个 Engine 同时只能有一个 implicit run。
 7. scheduler `Post` 必须 later-turn、非 inline。
 8. operation completion 只能消费一次；清理后迟到完成被忽略。
+9. Module API 的解析、链接、namespace 转换和每个 module body slice 都在同一个 owner 线程执行。
 
 ## 2. Engine API 防护
 
@@ -73,6 +74,8 @@ run 的执行/清理 scope      → 临时允许
 均在 owner 线程执行。
 
 当前完成 task 使用 `TrySetCanceled()`，不会保留原 token 实例；调用者应按 canceled task 处理，而不要依赖 token identity。
+
+Module run 的取消与 script run 相同：活动 module `ExecutionContext`、root frame、依赖 body 的 statement-list 恢复位置和 pending operation 都只在 owner cleanup turn 释放。取消后 module record 不应通过普通 `Modules.Import` 继续使用；应释放该 Engine，或把该 Engine 视为仅用于终止后的普通非模块工作。迟到完成不会重新进入 module graph。
 
 ## 7. Dispose
 

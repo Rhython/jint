@@ -182,6 +182,48 @@ public partial class Engine
             return Module.GetModuleNamespace(module);
         }
 
+        internal Module PrepareHostContinuationImport(string specifier)
+        {
+            var request = new ModuleRequest(specifier, []);
+            var moduleResolution = ModuleLoader.Resolve(referencingModuleLocation: null, request);
+            if (!_modules.TryGetValue(ModuleCacheKey.From(moduleResolution), out var module))
+            {
+                module = Load(referencingModuleLocation: null, request);
+            }
+
+            if (module is not CyclicModule)
+            {
+                Throw.NotSupportedException(
+                    "Implicit host-continuation module imports require a source-text ECMAScript module entry point.");
+            }
+            var cyclicModule = (CyclicModule) module;
+
+            if (cyclicModule.Status == ModuleStatus.Unlinked)
+            {
+                LinkModule(specifier, cyclicModule);
+            }
+            if (cyclicModule.HasTopLevelAwaitInGraph())
+            {
+                Throw.NotSupportedException(
+                    "Top-level await is not supported by ImportModuleWithHostContinuationsAsync.");
+            }
+
+            return module;
+        }
+
+        internal void EvaluateHostContinuationImport(Module module)
+        {
+            var completion = ((CyclicModule) module).EvaluateWithHostContinuations();
+            if (_engine.ActiveHostContinuationRun!.Root.IsSuspended)
+            {
+                return;
+            }
+            if (completion.Type == CompletionType.Throw)
+            {
+                Throw.JavaScriptException(_engine, completion.Value, completion.Location);
+            }
+        }
+
         private static void LinkModule(string specifier, Module module)
         {
             module.Link();

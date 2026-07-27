@@ -186,6 +186,12 @@ Owner thread             Jint                       I/O completion thread
 
 这不是浏览器或 Node 的完整事件循环模拟；宿主仍需定义自身宏任务/事件 turn 规则，并确保 `Post` 总是排队而非 inline。
 
+## 6.1 Module 执行
+
+`ImportModuleWithHostContinuationsAsync` 仍通过 Jint 原生 Module Record 完成解析、链接、依赖遍历、import binding 和 namespace 创建。无 top-level await 的 `SourceTextModule` body 使用 root `HostContinuationFrame` 作为 suspendable；依赖 body 挂起时，当前模块求值 DFS 的活动记录暂时回到 `Linked`，但已完成的依赖保持 `Evaluated`。后续 owner turn 从保存的模块 `ExecutionContext` 和 statement-list 位置重新进入同一原生求值图，不经过同步 `DrainEventLoopUntilSettled`。
+
+模块 body 正常结束后才执行环境资源清理并提交 `Evaluated` 状态。取消、Dispose 或迟到 operation completion 仍由同一个 run/frame 清理路径处理。top-level await 使用另一套 async-module promise 状态机，当前入口在执行前拒绝包含它的整个依赖图，避免两套 suspension 所有权交叉。
+
 ## 7. Engine 所有权
 
 一个 Engine 同时最多有一个 active `HostContinuationRun`。run 未完成期间：

@@ -21,6 +21,7 @@ data;
 - 异步完成线程只保存 CLR 结果/异常并调用 `IHostContinuationScheduler.Post`。
 - 同步完成的 `ValueTask` 也强制经过后续事件循环 turn，避免重入。
 - 普通函数嵌套、循环、调用参数、赋值、`try/catch/finally` 等路径复用 Jint 已有的 generator/async suspend-data 基础设施。
+- 原生 ECMAScript Module 静态依赖图可通过 `ImportModuleWithHostContinuationsAsync` 使用同一模型；不转写为 CommonJS，当前明确拒绝 top-level await 依赖图。
 - 这是一种**一次性恢复的宿主 effect 模式**，不是 Rhino 可复制、多次调用、可序列化的 first-class continuation 对象。
 
 ## 3. 实际验证状态

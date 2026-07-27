@@ -3,6 +3,7 @@ using Jint.Native;
 using Jint.Native.Function;
 using Jint.Runtime.Environments;
 using Jint.Runtime.Interpreter;
+using ModuleRecord = Jint.Runtime.Modules.Module;
 using ExecutionContext = Jint.Runtime.Environments.ExecutionContext;
 
 namespace Jint.Runtime.Continuations;
@@ -430,12 +431,30 @@ internal sealed class HostContinuationRun
         Root = new HostContinuationFrame(this, parent: null);
     }
 
+    internal HostContinuationRun(
+        Engine engine,
+        IHostContinuationScheduler scheduler,
+        ModuleRecord module,
+        Func<Engine, JsValue, object?> completionConverter,
+        CancellationToken cancellationToken)
+    {
+        Engine = engine;
+        Scheduler = scheduler;
+        CancellationToken = cancellationToken;
+        Strict = true;
+        Module = module;
+        _completionConverter = completionConverter;
+        OwnerThreadId = System.Environment.CurrentManagedThreadId;
+        Root = new HostContinuationFrame(this, parent: null);
+    }
+
     internal Engine Engine { get; }
     internal IHostContinuationScheduler Scheduler { get; }
     internal CancellationToken CancellationToken { get; }
     internal bool Strict { get; }
-    internal ScriptRecord ScriptRecord { get; }
-    internal ParserOptions ParserOptions { get; }
+    internal ScriptRecord? ScriptRecord { get; }
+    internal ParserOptions? ParserOptions { get; }
+    internal ModuleRecord? Module { get; }
     internal int OwnerThreadId { get; }
     internal HostContinuationFrame Root { get; }
     internal JintStatementList? Body { get; set; }

@@ -181,6 +181,48 @@ var completion = engine.EvaluateWithHostContinuationsAsync(...);
 
 当最后结果已被 `completionConverter` 转成 CLR DTO 后，外部代码可在其他线程观察完成 task；但 Engine 和 `JsValue` 仍不能跨线程访问。
 
+## 6.1 执行原生 ECMAScript Module
+
+通过 `Engine.Modules.Add` 注册的源码模块（包括 `Prepared<Module>`）可以在相同 owner 调度模型下导入：
+
+```csharp
+engine.Modules.Add("workflow", """
+    export default function run(input) {
+        return hostOperation(input);
+    }
+    """);
+engine.Modules.Add("entry", """
+    import run from "workflow";
+    export const result = run("request");
+    """);
+
+Task<string> completion = engine.ImportModuleWithHostContinuationsAsync(
+    "entry",
+    scheduler,
+    completionConverter: static (_, moduleNamespace) =>
+        moduleNamespace.AsObject().Get("result").AsString(),
+    cancellationToken);
+```
+
+公开 overload：
+
+```csharp
+Task<JsValue> ImportModuleWithHostContinuationsAsync(
+    string specifier,
+    IHostContinuationScheduler scheduler,
+    CancellationToken cancellationToken = default);
+
+Task<TResult> ImportModuleWithHostContinuationsAsync<TResult>(
+    string specifier,
+    IHostContinuationScheduler scheduler,
+    Func<Engine, JsValue, TResult> completionConverter,
+    CancellationToken cancellationToken = default);
+```
+
+传给 converter 的值是原生 module namespace object；import/export、live binding、依赖图链接和模块缓存继续使用 Jint 的 Module Record 实现，不做 CommonJS 改写。模块依赖图中的源码模块以及 entry module 直接或间接调用普通脚本函数时都可以挂起。
+
+此入口明确不支持依赖图中存在 top-level `await`；它会在执行任何模块 body 前抛出 `NotSupportedException`。dynamic `import()` 与隐式 host continuation 的组合也不在已支持边界内。普通同步 `Modules.Import` 行为不变。
+
 ## 7. 取消与 Dispose
 
 ```csharp

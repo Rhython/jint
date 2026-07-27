@@ -36,6 +36,7 @@ internal class SourceTextModule : CyclicModule
     // For TLA (Top-Level Await) support
     private JintStatementList? _tlaStatementList;
     private AsyncFunctionInstance? _tlaAsyncInstance;
+    private JintStatementList? _hostContinuationStatementList;
 
     internal SourceTextModule(Engine engine, Realm realm, in Prepared<AstModule> source, string? location, bool isAsync)
         : base(engine, realm, location, isAsync)
@@ -362,11 +363,40 @@ internal class SourceTextModule : CyclicModule
     /// </summary>
     internal override Completion ExecuteModule(PromiseCapability? capability = null)
     {
-        var moduleContext = new ExecutionContext(this, _environment, _environment, privateEnvironment: null, _realm, parserOptions: _parserOptions);
+        var hostRun = _engine.ActiveHostContinuationRun;
+        var moduleContext = new ExecutionContext(
+            this,
+            _environment,
+            _environment,
+            privateEnvironment: null,
+            _realm,
+            parserOptions: _parserOptions,
+            hostContinuationFrame: hostRun?.Root);
         if (!_hasTLA)
         {
             using (new StrictModeScope(strict: true, force: true))
             {
+                if (hostRun is not null)
+                {
+                    var resuming = hostRun.Root.IsResuming;
+                    if (!resuming)
+                    {
+                        _engine.EnterExecutionContext(moduleContext);
+                    }
+
+                    _hostContinuationStatementList ??= new JintStatementList(statement: null, _source.Body);
+                    var context = _engine._activeEvaluationContext ?? new EvaluationContext(_engine);
+                    var hostResult = _hostContinuationStatementList.Execute(context);
+                    if (hostRun.Root.IsSuspended)
+                    {
+                        return hostResult;
+                    }
+
+                    hostResult = _environment.DisposeResources(hostResult);
+                    _engine.LeaveExecutionContext();
+                    return hostResult;
+                }
+
                 var result = Completion.Empty();
                 _engine.EnterExecutionContext(moduleContext);
                 try

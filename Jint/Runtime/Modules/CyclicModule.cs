@@ -42,6 +42,59 @@ public abstract class CyclicModule : Module
 
     internal ref readonly SourceLocation AbnormalCompletionLocation => ref _abnormalCompletionLocation;
 
+    internal bool HasTopLevelAwaitInGraph(HashSet<CyclicModule> seen = null)
+    {
+        seen ??= [];
+        if (!seen.Add(this))
+        {
+            return false;
+        }
+        if (_hasTLA)
+        {
+            return true;
+        }
+
+        foreach (var request in _requestedModules)
+        {
+            if (_engine._host.GetImportedModule(this, request) is CyclicModule required
+                && required.HasTopLevelAwaitInGraph(seen))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    internal Completion EvaluateWithHostContinuations()
+    {
+        if (Status == ModuleStatus.Evaluated)
+        {
+            return Completion.Empty();
+        }
+        if (Status != ModuleStatus.Linked)
+        {
+            Throw.InvalidOperationException($"Error while evaluating module: Module is in an invalid state: {Status}");
+        }
+
+        var stack = new Stack<CyclicModule>();
+        ref var asyncEvalOrder = ref _engine.ModuleAsyncEvaluationCount;
+        var result = InnerModuleEvaluation(stack, 0, ref asyncEvalOrder);
+        if (_engine.ActiveHostContinuationRun!.Root.IsSuspended)
+        {
+            foreach (var module in stack)
+            {
+                if (module.Status == ModuleStatus.Evaluating)
+                {
+                    module.Status = ModuleStatus.Linked;
+                    module._dfsAncestorIndex = -1;
+                }
+            }
+            return result;
+        }
+
+        return result;
+    }
+
     /// <summary>
     /// https://tc39.es/ecma262/#sec-moduledeclarationlinking
     /// </summary>
@@ -344,6 +397,10 @@ public abstract class CyclicModule : Module
             var requiredModule = evaluationList[ei];
 
             var result = requiredModule.InnerModuleEvaluation(stack, index, ref asyncEvalOrder);
+            if (_engine.ActiveHostContinuationRun?.Root.IsSuspended == true)
+            {
+                return result;
+            }
             if (result.Type != CompletionType.Normal)
             {
                 return result;
@@ -417,6 +474,11 @@ public abstract class CyclicModule : Module
         else
         {
             completion = ExecuteModule();
+        }
+
+        if (_engine.ActiveHostContinuationRun?.Root.IsSuspended == true)
+        {
+            return completion;
         }
 
         if (StackReferenceCount(stack) != 1)
