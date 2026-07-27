@@ -528,7 +528,14 @@ internal sealed class HostContinuationRun
             Interlocked.Exchange(ref _resumeScheduled, 0);
             if (System.Environment.CurrentManagedThreadId == OwnerThreadId && Scheduler.CheckAccess())
             {
-                Interlocked.CompareExchange(ref _deferredOwnerFailure, exception, null);
+                if (_sliceRunning)
+                {
+                    Interlocked.CompareExchange(ref _deferredOwnerFailure, exception, null);
+                }
+                else
+                {
+                    Engine.FailHostContinuationRun(this, exception);
+                }
             }
             else
             {

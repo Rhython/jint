@@ -121,6 +121,7 @@ public partial class Engine
 
         public void Add(string specifier, string code)
         {
+            _engine.VerifyHostContinuationThreadAccess();
             var moduleBuilder = new ModuleBuilder(_engine, specifier);
             moduleBuilder.AddSource(code);
             Add(specifier, moduleBuilder);
@@ -128,6 +129,7 @@ public partial class Engine
 
         public void Add(string specifier, Action<ModuleBuilder> buildModule)
         {
+            _engine.VerifyHostContinuationThreadAccess();
             var moduleBuilder = new ModuleBuilder(_engine, specifier);
             buildModule(moduleBuilder);
             Add(specifier, moduleBuilder);
@@ -135,11 +137,13 @@ public partial class Engine
 
         public void Add(string specifier, ModuleBuilder moduleBuilder)
         {
+            _engine.VerifyHostContinuationThreadAccess();
             _builders.Add(specifier, moduleBuilder);
         }
 
         public ObjectInstance Import(string specifier)
         {
+            _engine.VerifyHostContinuationThreadAccess();
             return Import(specifier, referencingModuleLocation: null);
         }
 
