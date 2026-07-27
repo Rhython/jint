@@ -1,5 +1,4 @@
 using Jint.Native;
-using Jint.Native.AsyncFunction;
 using Jint.Native.Function;
 using Jint.Runtime.Interpreter.Expressions;
 using Environment = Jint.Runtime.Environments.Environment;
@@ -40,10 +39,13 @@ internal sealed class JintExportDefaultDeclaration : JintStatement<ExportDefault
     {
         var env = context.Engine.ExecutionContext.LexicalEnvironment;
         var asyncFn = context.Engine.ExecutionContext.AsyncFunction;
+        var hostFrame = context.Engine.ExecutionContext.HostContinuationFrame;
 
         // For function/class declarations, the binding is already initialized in SourceTextModule.InitializeEnvironment
-        // Skip if already bound AND we're not resuming from an async suspension
-        if (env.HasBinding("*default*") && (asyncFn is null || !asyncFn._isResuming))
+        // Skip if already bound AND we're not resuming from a suspension.
+        if (env.HasBinding("*default*")
+            && (asyncFn is null || !asyncFn._isResuming)
+            && (hostFrame is null || !hostFrame.IsResuming))
         {
             return Completion.Empty();
         }
@@ -72,8 +74,9 @@ internal sealed class JintExportDefaultDeclaration : JintStatement<ExportDefault
             value = _simpleExpression!.GetValue(context);
         }
 
-        // Check if we suspended at an await - don't initialize yet
-        if (asyncFn?._state == AsyncFunctionState.SuspendedAwait)
+        // A suspended expression has not produced its final value yet. Initializing the export
+        // here would permanently publish the suspension placeholder (usually undefined).
+        if (context.IsSuspended())
         {
             return Completion.Empty();
         }

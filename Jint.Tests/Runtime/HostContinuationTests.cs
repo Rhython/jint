@@ -694,6 +694,32 @@ public sealed class HostContinuationTests
     }
 
     [Fact]
+    public void DefaultExportExpressionIsInitializedAfterSuspendedConditionalResumes()
+    {
+        using var scheduler = new ManualOwnerScheduler();
+        var engine = new Engine();
+        var requests = new Queue<PendingRequest>();
+        engine.SetValue("host", CreateDeferredStringHost(engine, scheduler, requests));
+        engine.Modules.Add("workflow", "export default function run(value) { return host(value) + ':module'; }");
+        engine.Modules.Add(
+            "entry",
+            """
+            import * as workflow from 'workflow';
+            const entry = workflow.default;
+            export default typeof entry === 'function' ? entry('request') : undefined;
+            """);
+
+        var task = engine.ImportModuleWithHostContinuationsAsync(
+            "entry",
+            scheduler,
+            static (_, ns) => ns.AsObject().Get("default").AsString());
+
+        CompleteNext(requests, "host", "request", "response");
+        scheduler.RunUntil(() => task.IsCompleted, TestTimeout);
+        Assert.Equal("response:module", task.GetAwaiter().GetResult());
+    }
+
+    [Fact]
     public void ModuleRunRejectsOverlapAndCancellationIgnoresLateCompletion()
     {
         using var scheduler = new ManualOwnerScheduler();
