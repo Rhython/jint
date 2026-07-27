@@ -1,5 +1,6 @@
 ﻿#nullable disable
 
+using System.Runtime.ExceptionServices;
 using Jint.Native;
 using Jint.Native.Promise;
 using Jint.Runtime.Descriptors;
@@ -20,6 +21,7 @@ internal sealed record ResolvedBinding(Module Module, string BindingName)
 public abstract class CyclicModule : Module
 {
     private Completion? _evalError;
+    private ExceptionDispatchInfo _hostContinuationEvalException;
     private int _dfsAncestorIndex;
     internal HashSet<ModuleRequest> _requestedModules;
     private CyclicModule _cycleRoot;
@@ -69,7 +71,8 @@ public abstract class CyclicModule : Module
     {
         if (Status == ModuleStatus.Evaluated)
         {
-            return Completion.Empty();
+            _hostContinuationEvalException?.Throw();
+            return _evalError ?? Completion.Empty();
         }
         if (Status != ModuleStatus.Linked)
         {
@@ -78,7 +81,22 @@ public abstract class CyclicModule : Module
 
         var stack = new Stack<CyclicModule>();
         ref var asyncEvalOrder = ref _engine.ModuleAsyncEvaluationCount;
-        var result = InnerModuleEvaluation(stack, 0, ref asyncEvalOrder);
+        Completion result;
+        try
+        {
+            result = InnerModuleEvaluation(stack, 0, ref asyncEvalOrder);
+        }
+        catch (Exception exception)
+        {
+            var capturedException = ExceptionDispatchInfo.Capture(exception);
+            foreach (var module in stack)
+            {
+                module.Status = ModuleStatus.Evaluated;
+                module._hostContinuationEvalException = capturedException;
+            }
+            throw;
+        }
+
         if (_engine.ActiveHostContinuationRun!.Root.IsSuspended)
         {
             foreach (var module in stack)
@@ -90,6 +108,15 @@ public abstract class CyclicModule : Module
                 }
             }
             return result;
+        }
+
+        if (result.Type != CompletionType.Normal)
+        {
+            foreach (var module in stack)
+            {
+                module.Status = ModuleStatus.Evaluated;
+                module._evalError = result;
+            }
         }
 
         return result;
@@ -477,6 +504,10 @@ public abstract class CyclicModule : Module
         }
 
         if (_engine.ActiveHostContinuationRun?.Root.IsSuspended == true)
+        {
+            return completion;
+        }
+        if (completion.Type != CompletionType.Normal)
         {
             return completion;
         }

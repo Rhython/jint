@@ -384,17 +384,25 @@ internal class SourceTextModule : CyclicModule
                         _engine.EnterExecutionContext(moduleContext);
                     }
 
-                    _hostContinuationStatementList ??= new JintStatementList(statement: null, _source.Body);
-                    var context = _engine._activeEvaluationContext ?? new EvaluationContext(_engine);
-                    var hostResult = _hostContinuationStatementList.Execute(context);
-                    if (hostRun.Root.IsSuspended)
+                    try
                     {
-                        return hostResult;
-                    }
+                        _hostContinuationStatementList ??= new JintStatementList(statement: null, _source.Body);
+                        var context = _engine._activeEvaluationContext ?? new EvaluationContext(_engine);
+                        var hostResult = _hostContinuationStatementList.Execute(context);
+                        if (hostRun.Root.IsSuspended)
+                        {
+                            return hostResult;
+                        }
 
-                    hostResult = _environment.DisposeResources(hostResult);
-                    _engine.LeaveExecutionContext();
-                    return hostResult;
+                        return _environment.DisposeResources(hostResult);
+                    }
+                    finally
+                    {
+                        if (!hostRun.Root.IsSuspended)
+                        {
+                            _engine.LeaveExecutionContext();
+                        }
+                    }
                 }
 
                 var result = Completion.Empty();

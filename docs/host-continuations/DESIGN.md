@@ -192,6 +192,8 @@ Owner thread             Jint                       I/O completion thread
 
 模块 body 正常结束后才执行环境资源清理并提交 `Evaluated` 状态。取消、Dispose 或迟到 operation completion 仍由同一个 run/frame 清理路径处理。top-level await 使用另一套 async-module promise 状态机，当前入口在执行前拒绝包含它的整个依赖图，避免两套 suspension 所有权交叉。
 
+模块 body 或活动依赖图失败时，求值错误会按原生 Module Record 语义提交到当时活动的模块记录；以后再次导入 entry、失败依赖或失败循环中的成员都会传播同一失败，不会把已失败记录当作成功 namespace 返回。语句约束或 CLR fault 等非 JavaScript completion 同样作为该图的终态故障缓存。body 已进入的模块 `ExecutionContext` 在这些直接异常路径上仍会退出，因此 run 清理后 Engine 可继续执行不依赖该失败图的代码，但失败图本身不可重试。
+
 ## 7. Engine 所有权
 
 一个 Engine 同时最多有一个 active `HostContinuationRun`。run 未完成期间：

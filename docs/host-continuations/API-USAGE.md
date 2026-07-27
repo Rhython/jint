@@ -221,6 +221,8 @@ Task<TResult> ImportModuleWithHostContinuationsAsync<TResult>(
 
 传给 converter 的值是原生 module namespace object；import/export、live binding、依赖图链接和模块缓存继续使用 Jint 的 Module Record 实现，不做 CommonJS 改写。模块依赖图中的源码模块以及 entry module 直接或间接调用普通脚本函数时都可以挂起。
 
+模块求值失败会被原生 module cache 保留；后续导入同一 entry、失败依赖或失败循环成员会再次传播该错误，而不会重新执行 module body。语句约束和直接 CLR fault 也采用这一终态策略。失败 run 清理完成后 Engine 可用于其他求值，但要重试失败模块必须创建新的 Engine/module graph。
+
 此入口明确不支持依赖图中存在 top-level `await`；它会在执行任何模块 body 前抛出 `NotSupportedException`。dynamic `import()` 与隐式 host continuation 的组合也不在已支持边界内。普通同步 `Modules.Import` 行为不变。
 
 ## 7. 取消与 Dispose
