@@ -6,7 +6,7 @@
 
 # Jint
 
-Jint is a __Javascript interpreter__ for .NET which can run on __any modern .NET platform__ as it supports .NET Standard 2.0 and .NET 4.6.2 targets (and later).
+Jint is a __Javascript interpreter__ for .NET. Its NuGet package publishes runtime assemblies for .NET Standard 2.1, .NET 8, and .NET 10.
 
 ## Use cases and users
 
