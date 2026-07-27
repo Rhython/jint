@@ -2,7 +2,6 @@
 
   <PropertyGroup>
     <TargetFrameworks>net10.0</TargetFrameworks>
-    <TargetFrameworks Condition="'$(OS)' == 'Windows_NT'">$(TargetFrameworks);net472</TargetFrameworks>
     <IsPackable>false</IsPackable>
     <NoWarn>$(NoWarn);612;xUnit1051</NoWarn>
     <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
@@ -31,10 +30,6 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
-  </ItemGroup>
-
-  <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
-    <PackageReference Include="System.Text.Json" />
   </ItemGroup>
 
 </Project>
